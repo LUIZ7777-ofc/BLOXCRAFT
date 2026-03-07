@@ -1,0 +1,5 @@
+{
+  "name": "BloxCraft Sandbox",
+  "description": "A 3D sandbox building game inspired by Roblox, featuring AI-powered assistance and image generation for world building.",
+  "requestFramePermissions": ["pointer-lock"]
+}

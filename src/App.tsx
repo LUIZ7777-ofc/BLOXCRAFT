@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Canvas, useThree, useFrame } from '@react-three/fiber';
 import { Sky, PointerLockControls, Stars, KeyboardControls, useKeyboardControls } from '@react-three/drei';
 import { Physics, usePlane, useBox, useSphere } from '@react-three/cannon';
-import { nanoid } from 'nanoid';
 import * as THREE from 'three';
+import { nanoid } from 'nanoid';
 import { 
   Box as BoxIcon, 
   MessageSquare, 
@@ -20,6 +20,8 @@ import {
   Send,
   Sparkles,
   Maximize,
+  LogOut,
+  Shield,
   Code
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -41,6 +43,14 @@ declare global {
 // --- Types ---
 
 type BlockType = 'grass' | 'dirt' | 'stone' | 'glass' | 'wood' | 'custom';
+
+interface User {
+  id: string;
+  username: string;
+  isAdmin: boolean;
+  isBanned: boolean;
+  joinedAt: number;
+}
 
 interface Block {
   id: string;
@@ -94,19 +104,61 @@ function Baseplate() {
   );
 }
 
-function Cube({ position, type, onRemove }: { position: [number, number, number], type: BlockType, onRemove: () => void }) {
-  const [ref] = useBox(() => ({ type: 'Static', position }));
+function Cubes({ blocks, onRemove }: { blocks: Block[], onRemove: (id: string) => void }) {
+  const { raycaster, camera, mouse } = useThree();
+  
+  // Group blocks by type for instancing
+  const blocksByType = useMemo(() => {
+    const groups: Record<string, Block[]> = {};
+    if (!Array.isArray(blocks)) return groups;
+    blocks.forEach(block => {
+      if (!groups[block.type]) groups[block.type] = [];
+      groups[block.type].push(block);
+    });
+    return groups;
+  }, [blocks]);
 
   return (
-    <mesh 
-      ref={ref as any} 
-      castShadow 
+    <>
+      {Object.entries(blocksByType).map(([type, typeBlocks]) => (
+        <InstancedCubes 
+          key={type} 
+          type={type as BlockType} 
+          blocks={typeBlocks} 
+          onRemove={onRemove} 
+        />
+      ))}
+    </>
+  );
+}
+
+function InstancedCubes({ type, blocks, onRemove }: { type: BlockType, blocks: Block[], onRemove: (id: string) => void }) {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  const transform = useMemo(() => new THREE.Object3D(), []);
+
+  useEffect(() => {
+    if (!meshRef.current) return;
+    blocks.forEach((block, i) => {
+      transform.position.set(...block.pos);
+      transform.updateMatrix();
+      meshRef.current!.setMatrixAt(i, transform.matrix);
+    });
+    meshRef.current.instanceMatrix.needsUpdate = true;
+  }, [blocks, transform]);
+
+  return (
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined, undefined, blocks.length]}
+      castShadow
       receiveShadow
       onClick={(e) => {
         e.stopPropagation();
-        // Right click or Alt+Click to remove
-        if (e.button === 2 || (e.nativeEvent as any).altKey) {
-          onRemove();
+        if (e.instanceId !== undefined) {
+          const block = blocks[e.instanceId];
+          if (block && (e.button === 2 || (e.nativeEvent as any).altKey)) {
+            onRemove(block.id);
+          }
         }
       }}
     >
@@ -116,8 +168,14 @@ function Cube({ position, type, onRemove }: { position: [number, number, number]
         transparent={type === 'glass'}
         opacity={type === 'glass' ? 0.6 : 1}
       />
-    </mesh>
+    </instancedMesh>
   );
+}
+
+// Physics bodies (invisible)
+function PhysicsBlock({ position }: { position: [number, number, number] }) {
+  useBox(() => ({ type: 'Static', position }));
+  return null;
 }
 
 function Player({ onAddBlock }: { onAddBlock: (x: number, y: number, z: number) => void }) {
@@ -129,6 +187,9 @@ function Player({ onAddBlock }: { onAddBlock: (x: number, y: number, z: number) 
     type: 'Dynamic',
     position: [0, 5, 0],
     args: [0.5],
+    fixedRotation: true,
+    friction: 0.1,
+    linearDamping: 0.9, // Add damping to stop sliding
   }));
 
   const velocity = useRef([0, 0, 0]);
@@ -146,7 +207,7 @@ function Player({ onAddBlock }: { onAddBlock: (x: number, y: number, z: number) 
     const frontVector = new THREE.Vector3(0, 0, Number(backward) - Number(forward));
     const sideVector = new THREE.Vector3(Number(left) - Number(right), 0, 0);
 
-    const speed = shift ? 12 : 6;
+    const speed = shift ? 16 : 8; // Roblox speeds are usually around 16 studs/s
 
     direction
       .subVectors(frontVector, sideVector)
@@ -154,10 +215,11 @@ function Player({ onAddBlock }: { onAddBlock: (x: number, y: number, z: number) 
       .multiplyScalar(speed)
       .applyEuler(camera.rotation);
 
+    // Keep Y velocity for gravity/jumping
     api.velocity.set(direction.x, velocity.current[1], direction.z);
 
-    if (jump && Math.abs(velocity.current[1]) < 0.05) {
-      api.velocity.set(velocity.current[0], 4, velocity.current[2]);
+    if (jump && Math.abs(velocity.current[1]) < 0.1) {
+      api.velocity.set(velocity.current[0], 6, velocity.current[2]);
     }
   });
 
@@ -188,8 +250,80 @@ function Player({ onAddBlock }: { onAddBlock: (x: number, y: number, z: number) 
 // --- Main App Component ---
 
 export default function App() {
-  const [view, setView] = useState<View>('lobby');
+  const [view, setView] = useState<View | 'auth'>('auth');
+  const [user, setUser] = useState<User | null>(null);
+  const [allUsers, setAllUsers] = useState<User[]>([]);
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [authUsername, setAuthUsername] = useState('');
+  const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
+  const [bannedUserIds, setBannedUserIds] = useState<string[]>([]);
   const [games, setGames] = useState<Game[]>([]);
+
+  // Load users and banned list from localStorage
+  useEffect(() => {
+    const savedUsers = localStorage.getItem('bloxcraft_users');
+    const savedBanned = localStorage.getItem('bloxcraft_banned');
+    if (savedUsers) setAllUsers(JSON.parse(savedUsers));
+    if (savedBanned) setBannedUserIds(JSON.parse(savedBanned));
+  }, []);
+
+  // Save users and banned list to localStorage
+  useEffect(() => {
+    localStorage.setItem('bloxcraft_users', JSON.stringify(allUsers));
+  }, [allUsers]);
+
+  useEffect(() => {
+    localStorage.setItem('bloxcraft_banned', JSON.stringify(bannedUserIds));
+  }, [bannedUserIds]);
+
+  const handleAuth = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authUsername.trim()) return;
+
+    const existingUser = allUsers.find(u => u.username.toLowerCase() === authUsername.toLowerCase());
+
+    if (authMode === 'login') {
+      if (existingUser) {
+        if (bannedUserIds.includes(existingUser.id)) {
+          alert('You are banned from this experience.');
+          return;
+        }
+        setUser(existingUser);
+        setView('lobby');
+      } else {
+        alert('User not found. Please sign up.');
+      }
+    } else {
+      if (existingUser) {
+        alert('Username already taken.');
+      } else {
+        const newUser: User = {
+          id: Math.random().toString(36).substr(2, 9),
+          username: authUsername,
+          isAdmin: authUsername === 'laikinhomiproooooo',
+          isBanned: false,
+          joinedAt: Date.now()
+        };
+        setAllUsers([...allUsers, newUser]);
+        setUser(newUser);
+        setView('lobby');
+      }
+    }
+  };
+
+  const banUser = (userId: string) => {
+    if (userId === user?.id) return alert("You can't ban yourself!");
+    setBannedUserIds(prev => [...prev, userId]);
+  };
+
+  const unbanUser = (userId: string) => {
+    setBannedUserIds(prev => prev.filter(id => id !== userId));
+  };
+
+  const logout = () => {
+    setUser(null);
+    setView('auth');
+  };
   const [publicGames, setPublicGames] = useState<Game[]>([]);
   const [currentGameId, setCurrentGameId] = useState<string | null>(null);
   const [blocks, setBlocks] = useState<Block[]>([]);
@@ -315,9 +449,12 @@ export default function App() {
     }
   }, []);
 
-  // Save games to local storage
+  // Save games to local storage (debounced)
   useEffect(() => {
-    localStorage.setItem('bloxcraft-games', JSON.stringify(games));
+    const timeout = setTimeout(() => {
+      localStorage.setItem('bloxcraft-games', JSON.stringify(games));
+    }, 1000);
+    return () => clearTimeout(timeout);
   }, [games]);
 
   // Sync blocks and scripts with current game
@@ -459,26 +596,184 @@ export default function App() {
     }
   };
 
+  if (view === 'auth') {
+    return (
+      <div className="w-full h-screen bg-zinc-950 text-zinc-100 flex items-center justify-center p-4">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-md bg-zinc-900 border border-white/10 rounded-[32px] p-8 shadow-2xl"
+        >
+          <div className="flex flex-col items-center mb-8">
+            <div className="w-16 h-16 bg-emerald-500 rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-emerald-500/20">
+              <BoxIcon className="w-10 h-10 text-white" />
+            </div>
+            <h1 className="text-3xl font-black tracking-tighter italic">BLOXCRAFT</h1>
+            <p className="text-zinc-500 text-sm font-bold uppercase tracking-widest mt-2">Account Required</p>
+          </div>
+
+          <form onSubmit={handleAuth} className="space-y-4">
+            <div>
+              <label className="block text-[10px] font-black uppercase tracking-widest text-zinc-500 mb-2 ml-1">Username</label>
+              <input 
+                type="text"
+                value={authUsername}
+                onChange={(e) => setAuthUsername(e.target.value)}
+                placeholder="Enter your nickname..."
+                className="w-full bg-black/40 border border-white/10 rounded-2xl px-5 py-4 text-white placeholder:text-zinc-700 focus:outline-none focus:border-emerald-500/50 transition-all font-bold"
+              />
+            </div>
+
+            <button 
+              type="submit"
+              className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-black uppercase tracking-widest py-4 rounded-2xl transition-all shadow-lg shadow-emerald-600/20 active:scale-[0.98]"
+            >
+              {authMode === 'login' ? 'Log In' : 'Sign Up'}
+            </button>
+          </form>
+
+          <div className="mt-6 text-center">
+            <button 
+              onClick={() => setAuthMode(authMode === 'login' ? 'signup' : 'login')}
+              className="text-xs font-bold text-zinc-500 hover:text-white transition-colors uppercase tracking-widest"
+            >
+              {authMode === 'login' ? "Don't have an account? Sign Up" : "Already have an account? Log In"}
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
   if (view === 'lobby') {
     return (
       <div className="w-full h-screen bg-zinc-950 text-zinc-100 flex flex-col overflow-hidden">
         {/* Lobby Header */}
         <div className="p-8 border-b border-white/5 bg-zinc-900/50 backdrop-blur-xl flex justify-between items-center">
-          <div>
-            <h1 className="text-3xl font-black tracking-tighter flex items-center gap-3">
-              <BoxIcon className="w-8 h-8 text-emerald-400" />
-              BLOXCRAFT STUDIO
-            </h1>
-            <p className="text-xs uppercase tracking-widest opacity-40 mt-1 font-bold">Create • Build • Share</p>
+          <div className="flex items-center gap-6">
+            <div>
+              <h1 className="text-3xl font-black tracking-tighter italic flex items-center gap-3">
+                <BoxIcon className="w-8 h-8 text-emerald-400" />
+                BLOXCRAFT STUDIO
+              </h1>
+              <p className="text-xs uppercase tracking-widest opacity-40 mt-1 font-bold">Create • Build • Share</p>
+            </div>
+            
+            <div className="h-12 w-px bg-white/10" />
+            
+            <div className="flex items-center gap-3 bg-white/5 px-4 py-2 rounded-2xl border border-white/5">
+              <div className="w-8 h-8 rounded-full bg-emerald-500 flex items-center justify-center text-xs font-bold">
+                {user?.username[0].toUpperCase()}
+              </div>
+              <div>
+                <p className="text-xs font-black text-white">{user?.username}</p>
+                <p className="text-[8px] font-bold text-emerald-400 uppercase tracking-widest">{user?.isAdmin ? 'Admin' : 'Player'}</p>
+              </div>
+              <button onClick={logout} className="ml-2 p-2 hover:bg-white/10 rounded-lg transition-colors">
+                <LogOut className="w-4 h-4 opacity-40" />
+              </button>
+            </div>
           </div>
-          <button 
-            onClick={createNewGame}
-            className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-2xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-emerald-500/20 active:scale-95"
-          >
-            <Plus className="w-5 h-5" />
-            Create New Experience
-          </button>
+
+          <div className="flex gap-4">
+            {user?.isAdmin && (
+              <button 
+                onClick={() => setIsAdminPanelOpen(true)}
+                className="bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/20 px-6 py-3 rounded-2xl font-black uppercase tracking-widest text-xs transition-all flex items-center gap-2"
+              >
+                <Shield className="w-4 h-4" />
+                Admin Panel
+              </button>
+            )}
+            <button 
+              onClick={createNewGame}
+              className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-2xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-emerald-500/20 active:scale-95"
+            >
+              <Plus className="w-5 h-5" />
+              Create New Experience
+            </button>
+          </div>
         </div>
+
+        {/* Admin Panel Modal */}
+        <AnimatePresence>
+          {isAdminPanelOpen && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/80 backdrop-blur-md z-[200] flex items-center justify-center p-4"
+            >
+              <motion.div 
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                className="w-full max-w-2xl bg-zinc-900 border border-white/10 rounded-[32px] overflow-hidden shadow-2xl"
+              >
+                <div className="p-6 border-b border-white/10 flex justify-between items-center bg-red-600/10">
+                  <h2 className="text-xl font-black uppercase tracking-widest flex items-center gap-3 text-red-500">
+                    <Shield className="w-6 h-6" />
+                    Admin Control Center
+                  </h2>
+                  <button onClick={() => setIsAdminPanelOpen(false)} className="p-2 hover:bg-white/10 rounded-xl transition-colors">×</button>
+                </div>
+                
+                <div className="p-8 max-h-[60vh] overflow-y-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="text-[10px] uppercase font-black text-zinc-500 tracking-widest border-b border-white/5">
+                        <th className="pb-4">User</th>
+                        <th className="pb-4">Joined</th>
+                        <th className="pb-4">Status</th>
+                        <th className="pb-4 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {allUsers.map(u => (
+                        <tr key={u.id} className="group">
+                          <td className="py-4">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-bold">
+                                {u.username[0].toUpperCase()}
+                              </div>
+                              <span className="font-bold">{u.username} {u.id === user?.id && '(You)'}</span>
+                            </div>
+                          </td>
+                          <td className="py-4 text-xs text-zinc-500">{new Date(u.joinedAt).toLocaleDateString()}</td>
+                          <td className="py-4">
+                            {bannedUserIds.includes(u.id) ? (
+                              <span className="text-[8px] font-black uppercase bg-red-500/20 text-red-500 px-2 py-1 rounded">Banned</span>
+                            ) : (
+                              <span className="text-[8px] font-black uppercase bg-emerald-500/20 text-emerald-500 px-2 py-1 rounded">Active</span>
+                            )}
+                          </td>
+                          <td className="py-4 text-right">
+                            {u.id !== user?.id && !u.isAdmin && (
+                              bannedUserIds.includes(u.id) ? (
+                                <button 
+                                  onClick={() => unbanUser(u.id)}
+                                  className="text-[10px] font-black uppercase text-emerald-400 hover:underline"
+                                >
+                                  Unban
+                                </button>
+                              ) : (
+                                <button 
+                                  onClick={() => banUser(u.id)}
+                                  className="text-[10px] font-black uppercase text-red-500 hover:underline"
+                                >
+                                  Ban Player
+                                </button>
+                              )
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Game List */}
         <div className="flex-1 overflow-y-auto p-8">
@@ -599,28 +894,80 @@ export default function App() {
       ]}
     >
       <div className="relative w-full h-screen bg-zinc-950 overflow-hidden font-sans text-zinc-100">
+        {/* Roblox Top Bar */}
+        <div className="absolute top-0 left-0 right-0 h-12 bg-black/20 backdrop-blur-sm z-50 flex items-center px-2 justify-between pointer-events-none">
+          <div className="flex items-center gap-1 pointer-events-auto">
+            <button 
+              onClick={() => setView('lobby')}
+              className="w-9 h-9 flex items-center justify-center hover:bg-white/10 rounded transition-colors"
+            >
+              <img src="https://upload.wikimedia.org/wikipedia/commons/3/3a/Roblox_player_icon_black.svg" className="w-6 h-6 invert" alt="Menu" referrerPolicy="no-referrer" />
+            </button>
+            <button 
+              onClick={() => setIsChatOpen(!isChatOpen)}
+              className={`w-9 h-9 flex items-center justify-center hover:bg-white/10 rounded transition-colors ${isChatOpen ? 'bg-white/20' : ''}`}
+            >
+              <MessageSquare className="w-5 h-5 text-white" />
+            </button>
+            <button 
+              onClick={() => setIsScriptPanelOpen(!isScriptPanelOpen)}
+              className={`w-9 h-9 flex items-center justify-center hover:bg-white/10 rounded transition-colors ${isScriptPanelOpen ? 'bg-white/20' : ''}`}
+            >
+              <Code className="w-5 h-5 text-white" />
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 pointer-events-auto">
+            <div className="bg-black/40 px-3 py-1 rounded flex items-center gap-2 border border-white/10">
+              <span className="text-xs font-bold text-white/80">Experience:</span>
+              <span className="text-xs font-bold text-white truncate max-w-[150px]">
+                {games.find(g => g.id === currentGameId)?.name || 'Untitled'}
+              </span>
+            </div>
+            <button 
+              onClick={publishGame}
+              className="bg-emerald-500 hover:bg-emerald-400 text-white px-3 py-1 rounded text-xs font-bold transition-colors"
+            >
+              Publish
+            </button>
+          </div>
+        </div>
+
+        {/* Player List (Top Right) */}
+        <div className="absolute top-14 right-2 w-48 bg-black/40 backdrop-blur-md rounded-lg border border-white/10 z-40 pointer-events-none overflow-hidden">
+          <div className="bg-black/20 px-3 py-1.5 border-b border-white/5 flex justify-between items-center">
+            <span className="text-[10px] font-black uppercase tracking-wider text-white/40">Players</span>
+            <span className="text-[10px] font-black text-white/40">1/100</span>
+          </div>
+          <div className="p-1">
+            <div className="flex items-center gap-2 px-2 py-1.5 bg-white/10 rounded">
+              <div className="w-5 h-5 rounded-full bg-emerald-500 flex items-center justify-center text-[10px] font-bold text-white">
+                P
+              </div>
+              <span className="text-xs font-bold text-white truncate">Player (You)</span>
+            </div>
+          </div>
+        </div>
+
         {/* 3D Viewport */}
         <div className="absolute inset-0 z-0">
           <Canvas 
-            shadows 
-            camera={{ fov: 45 }} 
-            tabIndex={0}
+            shadows={{ type: THREE.BasicShadowMap }}
+            camera={{ fov: 75, near: 0.1, far: 1000 }}
+            dpr={[1, 1.5]}
+            gl={{ antialias: false, powerPreference: "high-performance" }}
             onPointerDown={(e) => (e.target as HTMLElement).focus()}
           >
-            <Sky sunPosition={[100, 100, 20]} />
-            <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
+            <Sky sunPosition={[100, 10, 100]} />
             <ambientLight intensity={0.5} />
-            <pointLight position={[10, 10, 10]} castShadow />
+            <pointLight position={[10, 10, 10]} castShadow intensity={1} shadow-mapSize={[512, 512]} />
             
-            <Physics gravity={[0, -9.81, 0]}>
+            <Physics gravity={[0, -20, 0]}>
               <Baseplate />
-              {blocks.map((block) => (
-                <Cube 
-                  key={block.id} 
-                  position={block.pos} 
-                  type={block.type} 
-                  onRemove={() => removeBlock(block.id)}
-                />
+              <Cubes blocks={blocks} onRemove={removeBlock} />
+              {/* Only render physics for blocks to keep collisions working */}
+              {blocks.map(block => (
+                <PhysicsBlock key={`phys-${block.id}`} position={block.pos} />
               ))}
               <Player onAddBlock={addBlock} />
             </Physics>
@@ -634,91 +981,102 @@ export default function App() {
         </div>
 
         {/* HUD / UI Overlay */}
-        <div className="absolute inset-0 pointer-events-none z-10 flex flex-col justify-between p-6">
-          {/* Top Bar */}
-          <div className="flex justify-between items-start pointer-events-auto">
-            <div className="flex gap-4 items-start">
-              <button 
-                onClick={() => setView('lobby')}
-                className="p-4 bg-zinc-900/80 backdrop-blur-md border border-white/10 rounded-2xl hover:bg-zinc-800 transition-colors pointer-events-auto shadow-2xl group"
-              >
-                <MousePointer2 className="w-5 h-5 group-hover:scale-110 transition-transform" />
-                <span className="text-[8px] uppercase font-bold block mt-1 opacity-40">Menu</span>
-              </button>
-              <div className="bg-zinc-900/80 backdrop-blur-md border border-white/10 p-4 rounded-2xl shadow-2xl">
-                <h1 className="text-xl font-bold tracking-tighter flex items-center gap-2">
-                  <BoxIcon className="w-6 h-6 text-emerald-400" />
-                  {games.find(g => g.id === currentGameId)?.name || 'EDITOR'}
-                </h1>
-                <p className="text-[10px] uppercase tracking-widest opacity-50 mt-1">Development Mode</p>
-              </div>
-            </div>
-
-            <div className="flex gap-2">
-              <button 
-                onClick={publishGame}
-                className="p-3 bg-emerald-600/80 backdrop-blur-md border border-emerald-500/20 rounded-xl hover:bg-emerald-500 transition-colors pointer-events-auto flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest"
-                title="Publish to Community"
-              >
-                <Sparkles className="w-4 h-4" />
-                Publish
-              </button>
-              <button 
-                onClick={() => setIsScriptPanelOpen(!isScriptPanelOpen)}
-                className="p-3 bg-zinc-900/80 backdrop-blur-md border border-white/10 rounded-xl hover:bg-zinc-800 transition-colors pointer-events-auto"
-                title="Scripts"
-              >
-                <Code className="w-5 h-5" />
-              </button>
-              <button 
-                onClick={() => setIsChatOpen(!isChatOpen)}
-                className="p-3 bg-zinc-900/80 backdrop-blur-md border border-white/10 rounded-xl hover:bg-zinc-800 transition-colors pointer-events-auto"
-              >
-                <MessageSquare className="w-5 h-5" />
-              </button>
-              <button 
-                onClick={() => setIsImageGenOpen(!isImageGenOpen)}
-                className="p-3 bg-zinc-900/80 backdrop-blur-md border border-white/10 rounded-xl hover:bg-zinc-800 transition-colors pointer-events-auto"
-              >
-                <ImageIcon className="w-5 h-5" />
-              </button>
-            </div>
-          </div>
+        <div className="absolute inset-0 pointer-events-none z-10 flex flex-col justify-between p-6 pt-16">
+          {/* Top Bar - Removed old one */}
+          <div />
 
           {/* Crosshair */}
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 border-2 border-white/50 rounded-full pointer-events-none flex items-center justify-center">
-            <div className="w-1 h-1 bg-white rounded-full" />
-          </div>
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1 h-1 bg-white/50 rounded-full pointer-events-none" />
 
-          {/* Bottom Toolbar */}
+          {/* Bottom Toolbar - Roblox Style Hotbar */}
           <div className="flex flex-col items-center gap-4 pointer-events-auto">
             {!isLocked && (
-              <div className="bg-black/50 backdrop-blur-md px-4 py-2 rounded-full text-[10px] uppercase tracking-widest font-bold text-white/60 animate-pulse border border-white/5">
-                Click to Start Building
+              <div className="bg-black/60 backdrop-blur-md px-6 py-3 rounded-lg text-sm font-bold text-white animate-pulse border border-white/10">
+                Click anywhere to play
               </div>
             )}
-            <div className="bg-zinc-900/90 backdrop-blur-xl border border-white/10 p-2 rounded-2xl flex gap-2 shadow-2xl">
-              {(['grass', 'dirt', 'stone', 'glass', 'wood'] as BlockType[]).map((type) => (
+            
+            <div className="flex gap-1 bg-black/40 p-1 rounded-lg border border-white/10">
+              {(['grass', 'dirt', 'stone', 'glass', 'wood'] as BlockType[]).map((type, index) => (
                 <button
                   key={type}
                   onClick={() => setActiveType(type)}
-                  className={`w-12 h-12 rounded-xl border-2 transition-all flex items-center justify-center overflow-hidden ${
-                    activeType === type ? 'border-emerald-400 scale-110 shadow-lg shadow-emerald-400/20' : 'border-transparent opacity-60 hover:opacity-100'
+                  className={`relative w-14 h-14 rounded-md border-2 transition-all flex items-center justify-center overflow-hidden ${
+                    activeType === type ? 'border-white scale-105 bg-white/20' : 'border-transparent bg-black/40 hover:bg-black/60'
                   }`}
-                  style={{ backgroundColor: BLOCK_COLORS[type] }}
                 >
-                  <span className="text-[10px] font-bold uppercase text-white drop-shadow-md">{type[0]}</span>
+                  <div 
+                    className="w-10 h-10 rounded shadow-inner"
+                    style={{ backgroundColor: BLOCK_COLORS[type] }}
+                  />
+                  <span className="absolute top-0.5 left-1 text-[10px] font-black text-white/50">{index + 1}</span>
                 </button>
               ))}
-            </div>
-            <div className="text-[10px] uppercase tracking-[0.2em] opacity-40 font-bold">
-              Click to place • Alt+Click to remove • WASD to move • Shift to Sprint
+              <button 
+                onClick={() => setIsImageGenOpen(!isImageGenOpen)}
+                className={`w-14 h-14 rounded-md border-2 transition-all flex items-center justify-center bg-black/40 hover:bg-black/60 border-transparent`}
+              >
+                <ImageIcon className="w-6 h-6 text-white/60" />
+              </button>
             </div>
           </div>
         </div>
 
         {/* Side Panels */}
         <AnimatePresence>
+          {/* Escape Menu (Roblox Style) */}
+          {!isLocked && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black/40 backdrop-blur-sm z-[100] flex items-center justify-center pointer-events-auto"
+            >
+              <div className="w-[600px] bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/5 overflow-hidden">
+                <div className="bg-[#393939] px-6 py-4 flex justify-between items-center border-b border-white/5">
+                  <div className="flex items-center gap-3">
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/3/3a/Roblox_player_icon_black.svg" className="w-6 h-6 invert" alt="Roblox" referrerPolicy="no-referrer" />
+                    <span className="font-black text-white uppercase tracking-wider">Settings</span>
+                  </div>
+                  <button 
+                    onClick={() => setIsLocked(true)}
+                    className="text-white/40 hover:text-white transition-colors font-bold"
+                  >
+                    Resume Game
+                  </button>
+                </div>
+                
+                <div className="p-8 space-y-6">
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-center bg-black/20 p-4 rounded-lg">
+                      <span className="text-sm font-bold text-white/80">Experience Name</span>
+                      <span className="text-sm font-bold text-white">{games.find(g => g.id === currentGameId)?.name}</span>
+                    </div>
+                    <div className="flex justify-between items-center bg-black/20 p-4 rounded-lg">
+                      <span className="text-sm font-bold text-white/80">Graphics Mode</span>
+                      <span className="text-sm font-bold text-white">Automatic</span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <button 
+                      onClick={() => setView('lobby')}
+                      className="w-full py-4 bg-[#4a4a4a] hover:bg-[#5a5a5a] text-white font-black uppercase tracking-widest rounded-lg transition-colors border-b-4 border-black/40 active:border-b-0 active:translate-y-1"
+                    >
+                      Leave Experience
+                    </button>
+                    <button 
+                      onClick={() => setIsLocked(true)}
+                      className="w-full py-4 bg-emerald-600 hover:bg-emerald-500 text-white font-black uppercase tracking-widest rounded-lg transition-colors border-b-4 border-black/40 active:border-b-0 active:translate-y-1"
+                    >
+                      Resume
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
           {isChatOpen && (
             <motion.div 
               initial={{ x: 400 }}

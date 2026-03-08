@@ -18,6 +18,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 type User = {
   id: string;
   username: string;
+  password?: string;
   isAdmin: boolean;
   isBanned: boolean;
   joinedAt: number;
@@ -58,6 +59,7 @@ export default function App() {
   const [allUsers, setAllUsers] = useState<User[]>([]);
   const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
   const [authUsername, setAuthUsername] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
   const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
   const [adminCommand, setAdminCommand] = useState('');
   const [bannedUserIds, setBannedUserIds] = useState<string[]>([]);
@@ -72,6 +74,8 @@ export default function App() {
   const [activeScript, setActiveScript] = useState<TreeNode | null>(null);
   const [scriptContent, setScriptContent] = useState('');
   const [isScriptOpen, setIsScriptOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  const [showExplorer, setShowExplorer] = useState(window.innerWidth >= 768);
 
   // Load users and banned list from localStorage
   useEffect(() => {
@@ -101,12 +105,16 @@ export default function App() {
 
   const handleAuth = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!authUsername.trim()) return;
+    if (!authUsername.trim() || !authPassword.trim()) return;
 
     const existingUser = allUsers.find(u => u.username.toLowerCase() === authUsername.toLowerCase());
 
     if (authMode === 'login') {
       if (existingUser) {
+        if (existingUser.password && existingUser.password !== authPassword) {
+          alert('Incorrect password.');
+          return;
+        }
         if (bannedUserIds.includes(existingUser.id)) {
           alert('You are banned from this experience.');
           return;
@@ -123,6 +131,7 @@ export default function App() {
         const newUser: User = {
           id: Math.random().toString(36).substr(2, 9),
           username: authUsername,
+          password: authPassword,
           isAdmin: authUsername === 'laikinhomiproooooo',
           isBanned: false,
           joinedAt: Date.now()
@@ -216,6 +225,9 @@ export default function App() {
     }
     
     const handleResize = () => {
+      setIsMobile(window.innerWidth < 768);
+      if (window.innerWidth >= 768) setShowExplorer(true);
+      
       if (canvas) {
         canvas.width = canvas.offsetWidth;
         canvas.height = canvas.offsetHeight;
@@ -243,13 +255,61 @@ export default function App() {
     };
 
     GameAPI.clear();
-    const code = gameTree.StarterPlayer.children![0].children![0].content || '';
-    try {
-        const scriptFunc = new Function('game', code);
-        scriptFunc(GameAPI);
-    } catch(e) {
-        alert("Erro no script: " + e);
+
+    const executeScripts = (nodes: TreeNode[] | Record<string, TreeNode>) => {
+      const items = Array.isArray(nodes) ? nodes : Object.values(nodes);
+      items.forEach(item => {
+        if (item.type === 'script' && item.content) {
+          try {
+            const scriptFunc = new Function('game', item.content);
+            scriptFunc(GameAPI);
+          } catch(e) {
+            console.error(`Erro no script ${item.name}: ` + e);
+          }
+        }
+        if (item.children) {
+          executeScripts(item.children);
+        }
+      });
+    };
+
+    executeScripts(gameTree);
+  };
+
+  const addScript = (parentNode: TreeNode, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const newScript: TreeNode = {
+      name: `Script_${Math.floor(Math.random() * 1000)}`,
+      icon: "📜",
+      type: "script",
+      content: "// Novo script\n"
+    };
+
+    const updateNode = (nodes: TreeNode[] | undefined): boolean => {
+      if (!nodes) return false;
+      for (let i = 0; i < nodes.length; i++) {
+        if (nodes[i] === parentNode) {
+          if (!nodes[i].children) nodes[i].children = [];
+          nodes[i].children!.push(newScript);
+          return true;
+        }
+        if (updateNode(nodes[i].children)) return true;
+      }
+      return false;
+    };
+    
+    const newTree = { ...gameTree };
+    let found = false;
+    for (const key in newTree) {
+      if (newTree[key] === parentNode) {
+        if (!newTree[key].children) newTree[key].children = [];
+        newTree[key].children!.push(newScript);
+        found = true;
+      } else if (!found) {
+        found = updateNode(newTree[key].children);
+      }
     }
+    setGameTree(newTree);
   };
 
   const openScript = (node: TreeNode) => {
@@ -296,7 +356,18 @@ export default function App() {
             if (item.type === 'script') openScript(item);
           }}
         >
-          <span>{item.icon}</span> {item.name}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1 }}>
+            <span>{item.icon}</span> {item.name}
+          </div>
+          {item.type !== 'script' && (
+            <button 
+              className="add-script-btn"
+              onClick={(e) => addScript(item, e)}
+              title="Add Script"
+            >
+              +
+            </button>
+          )}
         </div>
         {item.children && renderTree(item.children, 15)}
       </div>
@@ -339,6 +410,17 @@ export default function App() {
                 onChange={(e) => setAuthUsername(e.target.value)}
                 className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-zinc-600 focus:outline-none focus:border-blue-500/50 transition-all font-medium"
                 placeholder="Enter your username"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-2">Password</label>
+              <input 
+                type="password" 
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+                className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-zinc-600 focus:outline-none focus:border-blue-500/50 transition-all font-medium"
+                placeholder="Enter your password"
                 required
               />
             </div>
@@ -536,8 +618,11 @@ export default function App() {
     <div style={{ background: '#1a1a1a', color: '#ccc', fontFamily: 'sans-serif', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <style>{`
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        .tree-item { padding: 5px 10px; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+        .tree-item { padding: 5px 10px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
         .tree-item:hover { background: #333; }
+        .add-script-btn { background: transparent; color: #00ff00; border: none; cursor: pointer; font-weight: bold; font-size: 18px; opacity: 0.3; padding: 0 5px; transition: opacity 0.2s; }
+        .tree-item:hover .add-script-btn { opacity: 1; }
+        .add-script-btn:hover { opacity: 1; color: #fff; }
         .run-btn { background: #28a745; color: white; border: none; padding: 5px 15px; border-radius: 3px; cursor: pointer; font-weight: bold; }
         .run-btn:hover { background: #218838; }
         textarea { flex: 1; background: #1e1e1e; color: #d4d4d4; padding: 15px; font-family: monospace; border: none; outline: none; font-size: 14px; resize: none; }
@@ -546,22 +631,29 @@ export default function App() {
         .close-btn:hover { background: #555; }
         .back-btn { background: #444; color: white; border: none; padding: 5px 15px; border-radius: 3px; cursor: pointer; font-weight: bold; margin-right: 10px; }
         .back-btn:hover { background: #555; }
+        .toggle-explorer-btn { background: #444; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-weight: bold; margin-right: 10px; }
       `}</style>
       
       <header style={{ height: '40px', background: '#252526', borderBottom: '1px solid #3c3c3c', display: 'flex', alignItems: 'center', padding: '0 15px', fontWeight: 'bold', justifyContent: 'space-between' }}>
-          <div>
+          <div style={{ display: 'flex', alignItems: 'center' }}>
             <button className="back-btn" onClick={() => setView('lobby')}>← LOBBY</button>
-            <span>BLOXCRAFT STUDIO v2.0</span>
+            {isMobile && (
+              <button className="toggle-explorer-btn" onClick={() => setShowExplorer(!showExplorer)}>
+                {showExplorer ? 'Hide Explorer' : 'Show Explorer'}
+              </button>
+            )}
+            {!isMobile && <span>BLOXCRAFT STUDIO v2.0</span>}
+            {isMobile && <span style={{ marginLeft: '10px', color: '#888', fontSize: '12px' }}>LITE</span>}
           </div>
           <button className="run-btn" onClick={runGame}>▶ RODAR JOGO</button>
       </header>
 
-      <main style={{ flex: 1, display: 'flex' }}>
+      <main style={{ flex: 1, display: 'flex', position: 'relative' }}>
           <div id="viewport" style={{ flex: 1, background: '#000', position: 'relative', display: 'flex', flexDirection: 'column' }}>
               <canvas ref={canvasRef} style={{ background: '#111', width: '100%', height: '100%', cursor: 'crosshair', display: 'block' }}></canvas>
               
               {isScriptOpen && (
-                <div id="script-window" style={{ position: 'absolute', top: '50px', left: '50px', width: '80%', height: '80%', background: '#1e1e1e', border: '2px solid #3c3c3c', display: 'flex', flexDirection: 'column', zIndex: 10 }}>
+                <div id="script-window" style={{ position: 'absolute', top: isMobile ? '0' : '50px', left: isMobile ? '0' : '50px', width: isMobile ? '100%' : '80%', height: isMobile ? '100%' : '80%', background: '#1e1e1e', border: isMobile ? 'none' : '2px solid #3c3c3c', display: 'flex', flexDirection: 'column', zIndex: 10 }}>
                     <div style={{ padding: '10px', background: '#333', fontWeight: 'bold' }}>Editor de Script: <span style={{ color: '#00ff00' }}>{activeScript?.name}</span></div>
                     <textarea 
                       spellCheck="false" 
@@ -576,12 +668,17 @@ export default function App() {
               )}
           </div>
 
-          <div id="explorer" style={{ width: '220px', background: '#252526', borderLeft: '1px solid #3c3c3c', fontSize: '13px', overflowY: 'auto' }}>
-              <div style={{ padding: '10px', background: '#333', fontSize: '11px', fontWeight: 'bold', letterSpacing: '1px' }}>EXPLORER</div>
-              <div id="tree-root" style={{ paddingTop: '5px' }}>
-                {renderTree(gameTree)}
-              </div>
-          </div>
+          {showExplorer && (
+            <div id="explorer" style={{ width: isMobile ? '100%' : '220px', position: isMobile ? 'absolute' : 'relative', right: 0, top: 0, bottom: 0, background: '#252526', borderLeft: '1px solid #3c3c3c', fontSize: '13px', overflowY: 'auto', zIndex: 5 }}>
+                <div style={{ padding: '10px', background: '#333', fontSize: '11px', fontWeight: 'bold', letterSpacing: '1px', display: 'flex', justifyContent: 'space-between' }}>
+                  EXPLORER
+                  {isMobile && <button onClick={() => setShowExplorer(false)} style={{ background: 'none', border: 'none', color: 'white', cursor: 'pointer' }}>✕</button>}
+                </div>
+                <div id="tree-root" style={{ paddingTop: '5px' }}>
+                  {renderTree(gameTree)}
+                </div>
+            </div>
+          )}
       </main>
     </div>
   );

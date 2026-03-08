@@ -22,6 +22,7 @@ type User = {
   isAdmin: boolean;
   isBanned: boolean;
   joinedAt: number;
+  friends: string[];
 };
 
 type Game = {
@@ -66,6 +67,8 @@ export default function App() {
   const [games, setGames] = useState<Game[]>([]);
   const [publicGames, setPublicGames] = useState<Game[]>([]);
   const [currentGameId, setCurrentGameId] = useState<string | null>(null);
+  const [globalMessage, setGlobalMessage] = useState<string | null>(null);
+  const [friendUsername, setFriendUsername] = useState('');
 
   // 2D Studio State
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -82,19 +85,34 @@ export default function App() {
     const savedUsers = localStorage.getItem('bloxcraft_users');
     const savedBanned = localStorage.getItem('bloxcraft_banned');
     const savedGames = localStorage.getItem('bloxcraft-games');
+    const savedGlobalMsg = localStorage.getItem('bloxcraft_global_msg');
+    
     if (savedUsers) setAllUsers(JSON.parse(savedUsers));
     if (savedBanned) setBannedUserIds(JSON.parse(savedBanned));
     if (savedGames) setGames(JSON.parse(savedGames));
+    if (savedGlobalMsg) setGlobalMessage(savedGlobalMsg);
   }, []);
 
   // Save users and banned list to localStorage
   useEffect(() => {
     localStorage.setItem('bloxcraft_users', JSON.stringify(allUsers));
+    if (user) {
+      const updatedUser = allUsers.find(u => u.id === user.id);
+      if (updatedUser) setUser(updatedUser);
+    }
   }, [allUsers]);
 
   useEffect(() => {
     localStorage.setItem('bloxcraft_banned', JSON.stringify(bannedUserIds));
   }, [bannedUserIds]);
+
+  useEffect(() => {
+    if (globalMessage) {
+      localStorage.setItem('bloxcraft_global_msg', globalMessage);
+    } else {
+      localStorage.removeItem('bloxcraft_global_msg');
+    }
+  }, [globalMessage]);
 
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -134,7 +152,8 @@ export default function App() {
           password: authPassword,
           isAdmin: authUsername === 'laikinhomiproooooo',
           isBanned: false,
-          joinedAt: Date.now()
+          joinedAt: Date.now(),
+          friends: []
         };
         setAllUsers([...allUsers, newUser]);
         setUser(newUser);
@@ -158,8 +177,15 @@ export default function App() {
     if (parts.length < 2) return;
     
     const action = parts[0].toLowerCase();
-    const targetUsername = parts.slice(1).join(' ');
     
+    if (action === 'global') {
+      const msg = parts.slice(1).join(' ');
+      setGlobalMessage(msg);
+      setAdminCommand('');
+      return;
+    }
+
+    const targetUsername = parts.slice(1).join(' ');
     const targetUser = allUsers.find(u => u.username.toLowerCase() === targetUsername.toLowerCase());
     
     if (!targetUser) {
@@ -174,8 +200,42 @@ export default function App() {
       unbanUser(targetUser.id);
       setAdminCommand('');
     } else {
-      alert('Unknown command. Use "ban <username>" or "unban <username>".');
+      alert('Unknown command. Use "ban <username>", "unban <username>", or "global <message>".');
     }
+  };
+
+  const addFriend = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !friendUsername.trim()) return;
+
+    const targetUser = allUsers.find(u => u.username.toLowerCase() === friendUsername.toLowerCase());
+    
+    if (!targetUser) {
+      alert(`User "${friendUsername}" not found.`);
+      return;
+    }
+
+    if (targetUser.id === user.id) {
+      alert("You can't add yourself as a friend!");
+      return;
+    }
+
+    if (user.friends.includes(targetUser.id)) {
+      alert("You are already friends with this user.");
+      return;
+    }
+
+    setAllUsers(prev => prev.map(u => {
+      if (u.id === user.id) {
+        return { ...u, friends: [...u.friends, targetUser.id] };
+      }
+      if (u.id === targetUser.id) {
+        return { ...u, friends: [...u.friends, user.id] };
+      }
+      return u;
+    }));
+    setFriendUsername('');
+    alert(`Added ${targetUser.username} as a friend!`);
   };
 
   const logout = () => {
@@ -439,6 +499,31 @@ export default function App() {
   if (view === 'lobby') {
     return (
       <div className="min-h-screen bg-zinc-950 text-white">
+        {/* Global Message Banner */}
+        <AnimatePresence>
+          {globalMessage && (
+            <motion.div 
+              initial={{ opacity: 0, y: -50 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -50 }}
+              className="bg-red-600 text-white text-center py-2 px-4 font-bold text-sm tracking-widest uppercase shadow-lg z-[100] relative"
+            >
+              <div className="flex items-center justify-center gap-2">
+                <Shield className="w-4 h-4" />
+                GLOBAL ANNOUNCEMENT: {globalMessage}
+                {user?.isAdmin && (
+                  <button 
+                    onClick={() => setGlobalMessage(null)}
+                    className="ml-4 text-white/50 hover:text-white"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* Header */}
         <header className="border-b border-white/10 bg-zinc-900/50 backdrop-blur-md sticky top-0 z-50">
           <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
@@ -474,6 +559,54 @@ export default function App() {
         </header>
 
         <main className="max-w-7xl mx-auto px-6 py-12">
+          {/* Friends Section */}
+          <div className="mb-12 bg-zinc-900 border border-white/10 rounded-[32px] p-6">
+            <div className="flex justify-between items-center mb-6">
+              <h2 className="text-xl font-black tracking-tight flex items-center gap-2">
+                <Users className="w-5 h-5 text-blue-500" />
+                Friends ({user?.friends?.length || 0})
+              </h2>
+              <form onSubmit={addFriend} className="flex gap-2">
+                <input 
+                  type="text"
+                  value={friendUsername}
+                  onChange={(e) => setFriendUsername(e.target.value)}
+                  placeholder="Username to add..."
+                  className="bg-black/40 border border-white/10 rounded-xl px-4 py-2 text-white placeholder:text-zinc-600 focus:outline-none focus:border-blue-500/50 text-sm"
+                />
+                <button 
+                  type="submit"
+                  className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-xl font-bold text-sm transition-all shadow-lg shadow-blue-500/20"
+                >
+                  Add
+                </button>
+              </form>
+            </div>
+            
+            {user?.friends && user.friends.length > 0 ? (
+              <div className="flex gap-4 overflow-x-auto pb-2">
+                {user.friends.map(friendId => {
+                  const friend = allUsers.find(u => u.id === friendId);
+                  if (!friend) return null;
+                  return (
+                    <div key={friendId} className="flex flex-col items-center gap-2 min-w-[80px]">
+                      <div className="w-14 h-14 rounded-full bg-zinc-800 border-2 border-white/10 flex items-center justify-center text-xl font-black text-zinc-400">
+                        {friend.username[0].toUpperCase()}
+                      </div>
+                      <span className="text-xs font-bold text-zinc-400 truncate w-full text-center">
+                        {friend.username}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="text-center py-8 text-zinc-600 font-medium text-sm">
+                You don't have any friends yet. Add someone to start playing together!
+              </div>
+            )}
+          </div>
+
           <div className="flex justify-between items-end mb-8">
             <div>
               <h2 className="text-3xl font-black tracking-tight mb-2">Your Experiences</h2>
@@ -540,7 +673,7 @@ export default function App() {
                       type="text"
                       value={adminCommand}
                       onChange={(e) => setAdminCommand(e.target.value)}
-                      placeholder="e.g. ban player123, unban player123"
+                      placeholder="e.g. ban player123, unban player123, global Hello!"
                       className="flex-1 bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-zinc-600 focus:outline-none focus:border-red-500/50 transition-all font-mono text-sm"
                     />
                     <button 
@@ -647,6 +780,12 @@ export default function App() {
           </div>
           <button className="run-btn" onClick={runGame}>▶ RODAR JOGO</button>
       </header>
+
+      {globalMessage && (
+        <div style={{ background: '#dc2626', color: 'white', textAlign: 'center', padding: '5px', fontSize: '12px', fontWeight: 'bold', letterSpacing: '1px' }}>
+          GLOBAL: {globalMessage}
+        </div>
+      )}
 
       <main style={{ flex: 1, display: 'flex', position: 'relative' }}>
           <div id="viewport" style={{ flex: 1, background: '#000', position: 'relative', display: 'flex', flexDirection: 'column' }}>

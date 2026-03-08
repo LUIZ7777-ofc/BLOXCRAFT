@@ -1,7 +1,40 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { nanoid } from 'nanoid';
+import { 
+  Box as BoxIcon, 
+  MessageSquare, 
+  Settings, 
+  LogOut, 
+  Users, 
+  Play, 
+  Plus, 
+  Image as ImageIcon,
+  Code,
+  Shield
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 
+// Types
+type User = {
+  id: string;
+  username: string;
+  isAdmin: boolean;
+  isBanned: boolean;
+  joinedAt: number;
+};
+
+type Game = {
+  id: string;
+  name: string;
+  blocks: any[];
+  scripts: string;
+  lastModified: number;
+};
+
+type View = 'lobby' | 'editor';
+
+// 2D Studio Types
 type GameObject = { x: number, y: number, color: string, w: number, h: number };
-
 type TreeNode = {
   name: string;
   icon: string;
@@ -20,6 +53,19 @@ const initialGameTree: Record<string, TreeNode> = {
 };
 
 export default function App() {
+  const [view, setView] = useState<View | 'auth'>('auth');
+  const [user, setUser] = useState<User | null>(null);
+  const [allUsers, setAllUsers] = useState<User[]>([]);
+  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [authUsername, setAuthUsername] = useState('');
+  const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
+  const [adminCommand, setAdminCommand] = useState('');
+  const [bannedUserIds, setBannedUserIds] = useState<string[]>([]);
+  const [games, setGames] = useState<Game[]>([]);
+  const [publicGames, setPublicGames] = useState<Game[]>([]);
+  const [currentGameId, setCurrentGameId] = useState<string | null>(null);
+
+  // 2D Studio State
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [gameObjects, setGameObjects] = useState<GameObject[]>([]);
   const [gameTree, setGameTree] = useState(initialGameTree);
@@ -27,7 +73,127 @@ export default function App() {
   const [scriptContent, setScriptContent] = useState('');
   const [isScriptOpen, setIsScriptOpen] = useState(false);
 
-  const draw = (objects: GameObject[]) => {
+  // Load users and banned list from localStorage
+  useEffect(() => {
+    const savedUsers = localStorage.getItem('bloxcraft_users');
+    const savedBanned = localStorage.getItem('bloxcraft_banned');
+    const savedGames = localStorage.getItem('bloxcraft-games');
+    if (savedUsers) setAllUsers(JSON.parse(savedUsers));
+    if (savedBanned) setBannedUserIds(JSON.parse(savedBanned));
+    if (savedGames) setGames(JSON.parse(savedGames));
+  }, []);
+
+  // Save users and banned list to localStorage
+  useEffect(() => {
+    localStorage.setItem('bloxcraft_users', JSON.stringify(allUsers));
+  }, [allUsers]);
+
+  useEffect(() => {
+    localStorage.setItem('bloxcraft_banned', JSON.stringify(bannedUserIds));
+  }, [bannedUserIds]);
+
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      localStorage.setItem('bloxcraft-games', JSON.stringify(games));
+    }, 1000);
+    return () => clearTimeout(timeout);
+  }, [games]);
+
+  const handleAuth = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authUsername.trim()) return;
+
+    const existingUser = allUsers.find(u => u.username.toLowerCase() === authUsername.toLowerCase());
+
+    if (authMode === 'login') {
+      if (existingUser) {
+        if (bannedUserIds.includes(existingUser.id)) {
+          alert('You are banned from this experience.');
+          return;
+        }
+        setUser(existingUser);
+        setView('lobby');
+      } else {
+        alert('User not found. Please sign up.');
+      }
+    } else {
+      if (existingUser) {
+        alert('Username already taken.');
+      } else {
+        const newUser: User = {
+          id: Math.random().toString(36).substr(2, 9),
+          username: authUsername,
+          isAdmin: authUsername === 'laikinhomiproooooo',
+          isBanned: false,
+          joinedAt: Date.now()
+        };
+        setAllUsers([...allUsers, newUser]);
+        setUser(newUser);
+        setView('lobby');
+      }
+    }
+  };
+
+  const banUser = (userId: string) => {
+    if (userId === user?.id) return alert("You can't ban yourself!");
+    setBannedUserIds(prev => [...prev, userId]);
+  };
+
+  const unbanUser = (userId: string) => {
+    setBannedUserIds(prev => prev.filter(id => id !== userId));
+  };
+
+  const handleAdminCommand = (e: React.FormEvent) => {
+    e.preventDefault();
+    const parts = adminCommand.trim().split(' ');
+    if (parts.length < 2) return;
+    
+    const action = parts[0].toLowerCase();
+    const targetUsername = parts.slice(1).join(' ');
+    
+    const targetUser = allUsers.find(u => u.username.toLowerCase() === targetUsername.toLowerCase());
+    
+    if (!targetUser) {
+      alert(`User "${targetUsername}" not found.`);
+      return;
+    }
+    
+    if (action === 'ban') {
+      banUser(targetUser.id);
+      setAdminCommand('');
+    } else if (action === 'unban') {
+      unbanUser(targetUser.id);
+      setAdminCommand('');
+    } else {
+      alert('Unknown command. Use "ban <username>" or "unban <username>".');
+    }
+  };
+
+  const logout = () => {
+    setUser(null);
+    setView('auth');
+  };
+
+  const createNewGame = () => {
+    const newGame: Game = {
+      id: nanoid(),
+      name: `New Game ${games.length + 1}`,
+      blocks: [],
+      scripts: '// New Game Script',
+      lastModified: Date.now()
+    };
+    setGames([...games, newGame]);
+    setCurrentGameId(newGame.id);
+    setView('editor');
+  };
+
+  const enterGame = (id: string) => {
+    setCurrentGameId(id);
+    setView('editor');
+  };
+
+  // 2D Studio Logic
+  const draw = useCallback((objects: GameObject[]) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
@@ -38,9 +204,10 @@ export default function App() {
         ctx.fillStyle = obj.color;
         ctx.fillRect(obj.x, obj.y, obj.w, obj.h);
     });
-  };
+  }, []);
 
   useEffect(() => {
+    if (view !== 'editor') return;
     const canvas = canvasRef.current;
     if (canvas) {
       canvas.width = canvas.offsetWidth;
@@ -57,7 +224,7 @@ export default function App() {
     };
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, [gameObjects]);
+  }, [gameObjects, view, draw]);
 
   const runGame = () => {
     let currentObjects: GameObject[] = [];
@@ -136,6 +303,235 @@ export default function App() {
     ));
   };
 
+  if (view === 'auth') {
+    return (
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
+        <div className="w-full max-w-md bg-zinc-900 border border-white/10 p-8 rounded-[32px] shadow-2xl">
+          <div className="flex justify-center mb-8">
+            <div className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-500/20">
+              <BoxIcon className="w-8 h-8 text-white" />
+            </div>
+          </div>
+          <h1 className="text-3xl font-black text-center text-white mb-2 tracking-tight">BloxCraft</h1>
+          <p className="text-zinc-400 text-center mb-8 font-medium">Create, play, and explore together</p>
+          
+          <div className="flex gap-2 mb-8 bg-black/40 p-1 rounded-2xl">
+            <button 
+              onClick={() => setAuthMode('login')}
+              className={`flex-1 py-3 rounded-xl font-bold text-sm transition-all ${authMode === 'login' ? 'bg-zinc-800 text-white shadow-md' : 'text-zinc-500 hover:text-zinc-300'}`}
+            >
+              Log In
+            </button>
+            <button 
+              onClick={() => setAuthMode('signup')}
+              className={`flex-1 py-3 rounded-xl font-bold text-sm transition-all ${authMode === 'signup' ? 'bg-zinc-800 text-white shadow-md' : 'text-zinc-500 hover:text-zinc-300'}`}
+            >
+              Sign Up
+            </button>
+          </div>
+
+          <form onSubmit={handleAuth} className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-zinc-500 uppercase tracking-wider mb-2">Username</label>
+              <input 
+                type="text" 
+                value={authUsername}
+                onChange={(e) => setAuthUsername(e.target.value)}
+                className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-zinc-600 focus:outline-none focus:border-blue-500/50 transition-all font-medium"
+                placeholder="Enter your username"
+                required
+              />
+            </div>
+            <button 
+              type="submit"
+              className="w-full bg-white text-black hover:bg-zinc-200 py-4 rounded-xl font-black uppercase tracking-widest text-sm transition-all shadow-lg active:scale-95"
+            >
+              {authMode === 'login' ? 'Enter World' : 'Create Account'}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  if (view === 'lobby') {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-white">
+        {/* Header */}
+        <header className="border-b border-white/10 bg-zinc-900/50 backdrop-blur-md sticky top-0 z-50">
+          <div className="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center shadow-lg shadow-blue-500/20">
+                <BoxIcon className="w-6 h-6 text-white" />
+              </div>
+              <div>
+                <h1 className="text-xl font-black tracking-tight">BloxCraft</h1>
+                <p className="text-xs text-zinc-400 font-medium">Welcome back, {user?.username}</p>
+              </div>
+            </div>
+            
+            <div className="flex items-center gap-4">
+              {user?.isAdmin && (
+                <button 
+                  onClick={() => setIsAdminPanelOpen(true)}
+                  className="p-2.5 text-red-500 hover:bg-red-500/10 rounded-xl transition-colors"
+                  title="Admin Panel"
+                >
+                  <Shield className="w-5 h-5" />
+                </button>
+              )}
+              <button 
+                onClick={logout}
+                className="p-2.5 text-zinc-400 hover:text-white hover:bg-white/10 rounded-xl transition-colors"
+                title="Log Out"
+              >
+                <LogOut className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <main className="max-w-7xl mx-auto px-6 py-12">
+          <div className="flex justify-between items-end mb-8">
+            <div>
+              <h2 className="text-3xl font-black tracking-tight mb-2">Your Experiences</h2>
+              <p className="text-zinc-400 font-medium">Create and manage your worlds</p>
+            </div>
+            <button 
+              onClick={createNewGame}
+              className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-2xl font-bold flex items-center gap-2 transition-all shadow-lg shadow-emerald-500/20 active:scale-95"
+            >
+              <Plus className="w-5 h-5" />
+              Create New Experience
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {games.map(game => (
+              <div 
+                key={game.id}
+                onClick={() => enterGame(game.id)}
+                className="group bg-zinc-900 border border-white/10 rounded-[32px] p-6 cursor-pointer hover:border-blue-500/50 hover:shadow-2xl hover:shadow-blue-500/10 transition-all"
+              >
+                <div className="aspect-video bg-black/40 rounded-2xl mb-6 flex items-center justify-center overflow-hidden relative">
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent z-10" />
+                  <BoxIcon className="w-12 h-12 text-zinc-700 group-hover:text-blue-500/50 transition-colors" />
+                </div>
+                <h3 className="text-xl font-bold mb-2">{game.name}</h3>
+                <div className="flex items-center justify-between text-sm text-zinc-500 font-medium">
+                  <span>Last edited {new Date(game.lastModified).toLocaleDateString()}</span>
+                  <div className="flex items-center gap-1">
+                    <Users className="w-4 h-4" />
+                    <span>Private</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </main>
+
+        {/* Admin Panel Modal */}
+        <AnimatePresence>
+          {isAdminPanelOpen && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/80 backdrop-blur-md z-[200] flex items-center justify-center p-4"
+            >
+              <motion.div 
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                className="w-full max-w-2xl bg-zinc-900 border border-white/10 rounded-[32px] overflow-hidden shadow-2xl"
+              >
+                <div className="p-6 border-b border-white/10 flex justify-between items-center bg-red-600/10">
+                  <h2 className="text-xl font-black uppercase tracking-widest flex items-center gap-3 text-red-500">
+                    <Shield className="w-6 h-6" />
+                    Admin Control Center
+                  </h2>
+                  <button onClick={() => setIsAdminPanelOpen(false)} className="p-2 hover:bg-white/10 rounded-xl transition-colors">×</button>
+                </div>
+                
+                <div className="p-6 border-b border-white/10 bg-black/20">
+                  <form onSubmit={handleAdminCommand} className="flex gap-4">
+                    <input 
+                      type="text"
+                      value={adminCommand}
+                      onChange={(e) => setAdminCommand(e.target.value)}
+                      placeholder="e.g. ban player123, unban player123"
+                      className="flex-1 bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-zinc-600 focus:outline-none focus:border-red-500/50 transition-all font-mono text-sm"
+                    />
+                    <button 
+                      type="submit"
+                      className="bg-red-600 hover:bg-red-500 text-white px-6 py-3 rounded-xl font-black uppercase tracking-widest text-xs transition-all shadow-lg shadow-red-600/20 active:scale-95"
+                    >
+                      Execute
+                    </button>
+                  </form>
+                </div>
+
+                <div className="p-8 max-h-[50vh] overflow-y-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="text-[10px] uppercase font-black text-zinc-500 tracking-widest border-b border-white/5">
+                        <th className="pb-4">User</th>
+                        <th className="pb-4">Joined</th>
+                        <th className="pb-4">Status</th>
+                        <th className="pb-4 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5">
+                      {allUsers.map(u => (
+                        <tr key={u.id} className="group">
+                          <td className="py-4">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-bold">
+                                {u.username[0].toUpperCase()}
+                              </div>
+                              <span className="font-bold">{u.username} {u.id === user?.id && '(You)'}</span>
+                            </div>
+                          </td>
+                          <td className="py-4 text-xs text-zinc-500">{new Date(u.joinedAt).toLocaleDateString()}</td>
+                          <td className="py-4">
+                            {bannedUserIds.includes(u.id) ? (
+                              <span className="text-[8px] font-black uppercase bg-red-500/20 text-red-500 px-2 py-1 rounded">Banned</span>
+                            ) : (
+                              <span className="text-[8px] font-black uppercase bg-emerald-500/20 text-emerald-500 px-2 py-1 rounded">Active</span>
+                            )}
+                          </td>
+                          <td className="py-4 text-right">
+                            {u.id !== user?.id && !u.isAdmin && (
+                              bannedUserIds.includes(u.id) ? (
+                                <button 
+                                  onClick={() => unbanUser(u.id)}
+                                  className="text-[10px] font-black uppercase text-emerald-400 hover:underline"
+                                >
+                                  Unban
+                                </button>
+                              ) : (
+                                <button 
+                                  onClick={() => banUser(u.id)}
+                                  className="text-[10px] font-black uppercase text-red-400 hover:underline opacity-0 group-hover:opacity-100 transition-opacity"
+                                >
+                                  Ban
+                                </button>
+                              )
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    );
+  }
+
+  // 2D Studio Editor View
   return (
     <div style={{ background: '#1a1a1a', color: '#ccc', fontFamily: 'sans-serif', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <style>{`
@@ -148,10 +544,15 @@ export default function App() {
         .btns { padding: 10px; display: flex; gap: 10px; background: #2d2d2d; justify-content: flex-end; }
         .close-btn { background: #444; color: white; border: none; padding: 5px 15px; border-radius: 3px; cursor: pointer; }
         .close-btn:hover { background: #555; }
+        .back-btn { background: #444; color: white; border: none; padding: 5px 15px; border-radius: 3px; cursor: pointer; font-weight: bold; margin-right: 10px; }
+        .back-btn:hover { background: #555; }
       `}</style>
       
       <header style={{ height: '40px', background: '#252526', borderBottom: '1px solid #3c3c3c', display: 'flex', alignItems: 'center', padding: '0 15px', fontWeight: 'bold', justifyContent: 'space-between' }}>
-          <span>BLOXCRAFT STUDIO v2.0</span>
+          <div>
+            <button className="back-btn" onClick={() => setView('lobby')}>← LOBBY</button>
+            <span>BLOXCRAFT STUDIO v2.0</span>
+          </div>
           <button className="run-btn" onClick={runGame}>▶ RODAR JOGO</button>
       </header>
 

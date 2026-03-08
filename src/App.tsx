@@ -28,8 +28,7 @@ type User = {
 type Game = {
   id: string;
   name: string;
-  blocks: any[];
-  scripts: string;
+  tree: Record<string, TreeNode>;
   lastModified: number;
   ownerId?: string;
 };
@@ -37,7 +36,7 @@ type Game = {
 type View = 'lobby' | 'editor';
 
 // 2D Studio Types
-type GameObject = { x: number, y: number, color: string, w: number, h: number };
+type GameObject = { type?: 'rect' | 'text', text?: string, font?: string, x: number, y: number, color: string, w?: number, h?: number };
 type TreeNode = {
   name: string;
   icon: string;
@@ -47,15 +46,47 @@ type TreeNode = {
 };
 
 const initialGameTree: Record<string, TreeNode> = {
-  Workspace: { name: "Workspace", icon: "🌍", children: [] },
+  Workspace: { name: "Workspace", icon: "🌍", children: [
+      { name: "Baseplate", icon: "📜", type: "script", content: `// Baseplate Script
+const baseplate = game.createPart(0, 0, '#2d2d2d', 10000, 50);
+
+game.onUpdate(() => {
+  baseplate.y = game.getCanvasHeight() - 50;
+  baseplate.w = game.getCanvasWidth();
+});` },
+      { name: "CoinSpawner", icon: "📜", type: "script", content: `// Coin Spawner & Score
+let score = 0;
+const scoreText = game.createText('Score: 0', 20, 40, '#ffffff', 'bold 24px sans-serif');
+const coins = [];
+
+// Spawn a coin every 2 seconds
+let timer = 0;
+game.onUpdate((dt) => {
+  timer += dt;
+  if (timer > 2) {
+    timer = 0;
+    const x = Math.random() * (game.getCanvasWidth() - 30);
+    const y = Math.random() * (game.getCanvasHeight() - 100);
+    const coin = game.createPart(x, y, '#fbbf24', 30, 30);
+    coins.push(coin);
+  }
+});
+
+// Expose coins and score to global game object so player can interact
+game.state = { coins, score, scoreText };
+` }
+  ]},
   StarterPlayer: { name: "StarterPlayer", icon: "👤", children: [
       { name: "StarterPlayerScripts", icon: "📁", children: [
-          { name: "PlayerMovement", icon: "📜", type: "script", content: `// Player Movement Script
+          { name: "PlayerMovement", icon: "📜", type: "script", content: `// Player Movement & Collision Script
 const player = game.createPart(100, 100, '#3b82f6', 40, 40);
-const speed = 300;
+const normalSpeed = 300;
+const sprintSpeed = 600;
 
 game.onUpdate((dt) => {
   const keys = game.getKeys();
+  const speed = keys['Shift'] ? sprintSpeed : normalSpeed;
+  
   if (keys['ArrowUp'] || keys['w']) player.y -= speed * dt;
   if (keys['ArrowDown'] || keys['s']) player.y += speed * dt;
   if (keys['ArrowLeft'] || keys['a']) player.x -= speed * dt;
@@ -66,6 +97,25 @@ game.onUpdate((dt) => {
   if (player.y < 0) player.y = 0;
   if (player.x > game.getCanvasWidth() - player.w) player.x = game.getCanvasWidth() - player.w;
   if (player.y > game.getCanvasHeight() - player.h) player.y = game.getCanvasHeight() - player.h;
+
+  // Check collision with coins
+  if (game.state && game.state.coins) {
+    for (let i = game.state.coins.length - 1; i >= 0; i--) {
+      const coin = game.state.coins[i];
+      if (
+        player.x < coin.x + coin.w &&
+        player.x + player.w > coin.x &&
+        player.y < coin.y + coin.h &&
+        player.y + player.h > coin.y
+      ) {
+        // Collision detected!
+        game.destroyPart(coin);
+        game.state.coins.splice(i, 1);
+        game.state.score += 10;
+        game.state.scoreText.text = 'Score: ' + game.state.score;
+      }
+    }
+  }
 });` }
       ]}
   ]}
@@ -106,11 +156,25 @@ export default function App() {
     const savedBanned = localStorage.getItem('bloxcraft_banned');
     const savedGames = localStorage.getItem('bloxcraft-games');
     const savedGlobalMsg = localStorage.getItem('bloxcraft_global_msg');
+    const savedUserId = localStorage.getItem('bloxcraft_current_user');
     
-    if (savedUsers) setAllUsers(JSON.parse(savedUsers));
+    let loadedUsers: User[] = [];
+    if (savedUsers) {
+      loadedUsers = JSON.parse(savedUsers);
+      setAllUsers(loadedUsers);
+    }
+    
     if (savedBanned) setBannedUserIds(JSON.parse(savedBanned));
     if (savedGames) setGames(JSON.parse(savedGames));
     if (savedGlobalMsg) setGlobalMessage(savedGlobalMsg);
+
+    if (savedUserId && loadedUsers.length > 0) {
+      const currentUser = loadedUsers.find(u => u.id === savedUserId);
+      if (currentUser && !JSON.parse(savedBanned || '[]').includes(currentUser.id)) {
+        setUser(currentUser);
+        setView('lobby');
+      }
+    }
   }, []);
 
   // Save users and banned list to localStorage
@@ -118,9 +182,14 @@ export default function App() {
     localStorage.setItem('bloxcraft_users', JSON.stringify(allUsers));
     if (user) {
       const updatedUser = allUsers.find(u => u.id === user.id);
-      if (updatedUser) setUser(updatedUser);
+      if (updatedUser) {
+        setUser(updatedUser);
+        localStorage.setItem('bloxcraft_current_user', updatedUser.id);
+      }
+    } else {
+      localStorage.removeItem('bloxcraft_current_user');
     }
-  }, [allUsers]);
+  }, [allUsers, user]);
 
   useEffect(() => {
     localStorage.setItem('bloxcraft_banned', JSON.stringify(bannedUserIds));
@@ -267,6 +336,7 @@ export default function App() {
 
   const logout = () => {
     setUser(null);
+    localStorage.removeItem('bloxcraft_current_user');
     setView('auth');
   };
 
@@ -274,27 +344,35 @@ export default function App() {
     const newGame: Game = {
       id: nanoid(),
       name: `New Game ${games.length + 1}`,
-      blocks: [],
-      scripts: '// New Game Script',
+      tree: JSON.parse(JSON.stringify(initialGameTree)),
       lastModified: Date.now(),
       ownerId: user?.id
     };
     setGames([...games, newGame]);
     setCurrentGameId(newGame.id);
+    setGameTree(newGame.tree);
     setIsPlayOnlyMode(false);
     setView('editor');
   };
 
   const editGame = (id: string) => {
-    setCurrentGameId(id);
-    setIsPlayOnlyMode(false);
-    setView('editor');
+    const game = games.find(g => g.id === id);
+    if (game) {
+      setCurrentGameId(id);
+      setGameTree(game.tree || initialGameTree);
+      setIsPlayOnlyMode(false);
+      setView('editor');
+    }
   };
 
   const playGame = (id: string) => {
-    setCurrentGameId(id);
-    setIsPlayOnlyMode(true);
-    setView('editor');
+    const game = games.find(g => g.id === id);
+    if (game) {
+      setCurrentGameId(id);
+      setGameTree(game.tree || initialGameTree);
+      setIsPlayOnlyMode(true);
+      setView('editor');
+    }
   };
 
   // 2D Studio Logic
@@ -307,7 +385,12 @@ export default function App() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     objects.forEach(obj => {
         ctx.fillStyle = obj.color;
-        ctx.fillRect(obj.x, obj.y, obj.w, obj.h);
+        if (obj.type === 'text' && obj.text) {
+          ctx.font = obj.font || '20px sans-serif';
+          ctx.fillText(obj.text, obj.x, obj.y);
+        } else {
+          ctx.fillRect(obj.x, obj.y, obj.w || 50, obj.h || 50);
+        }
     });
   }, []);
 
@@ -360,10 +443,20 @@ export default function App() {
     window.addEventListener('keyup', handleKeyUp);
 
     const GameAPI = {
+        state: {}, // For sharing data between scripts
         createPart: (x: number, y: number, color: string, w: number = 50, h: number = 50) => {
-            const part = { x, y, color: color || 'white', w, h };
+            const part: GameObject = { type: 'rect', x, y, color: color || 'white', w, h };
             currentObjects.push(part);
             return part;
+        },
+        createText: (text: string, x: number, y: number, color: string, font: string = '20px sans-serif') => {
+            const part: GameObject = { type: 'text', text, x, y, color, font };
+            currentObjects.push(part);
+            return part;
+        },
+        destroyPart: (part: GameObject) => {
+            const index = currentObjects.indexOf(part);
+            if (index > -1) currentObjects.splice(index, 1);
         },
         onUpdate: (cb: Function) => {
             updateCallbacks.push(cb);
@@ -499,7 +592,13 @@ export default function App() {
         }
       }
       setGameTree(newTree);
-      alert("Script compilado!");
+      
+      // Save to games list
+      if (currentGameId) {
+        setGames(prev => prev.map(g => g.id === currentGameId ? { ...g, tree: newTree, lastModified: Date.now() } : g));
+      }
+      
+      alert("Script compilado e salvo!");
     }
   };
 

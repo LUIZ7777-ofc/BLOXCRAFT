@@ -49,7 +49,23 @@ const initialGameTree: Record<string, TreeNode> = {
   Workspace: { name: "Workspace", icon: "🌍", children: [] },
   StarterPlayer: { name: "StarterPlayer", icon: "👤", children: [
       { name: "StarterPlayerScripts", icon: "📁", children: [
-          { name: "MainScript", icon: "📜", type: "script", content: "// Use game.createPart(x, y, cor)\ngame.createPart(100, 100, 'red');\ngame.createPart(200, 150, 'lime');" }
+          { name: "PlayerMovement", icon: "📜", type: "script", content: `// Player Movement Script
+const player = game.createPart(100, 100, '#3b82f6', 40, 40);
+const speed = 300;
+
+game.onUpdate((dt) => {
+  const keys = game.getKeys();
+  if (keys['ArrowUp'] || keys['w']) player.y -= speed * dt;
+  if (keys['ArrowDown'] || keys['s']) player.y += speed * dt;
+  if (keys['ArrowLeft'] || keys['a']) player.x -= speed * dt;
+  if (keys['ArrowRight'] || keys['d']) player.x += speed * dt;
+  
+  // Keep in bounds
+  if (player.x < 0) player.x = 0;
+  if (player.y < 0) player.y = 0;
+  if (player.x > game.getCanvasWidth() - player.w) player.x = game.getCanvasWidth() - player.w;
+  if (player.y > game.getCanvasHeight() - player.h) player.y = game.getCanvasHeight() - player.h;
+});` }
       ]}
   ]}
 };
@@ -79,6 +95,8 @@ export default function App() {
   const [isScriptOpen, setIsScriptOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const [showExplorer, setShowExplorer] = useState(window.innerWidth >= 768);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const engineRef = useRef<{ stop: () => void } | null>(null);
 
   // Load users and banned list from localStorage
   useEffect(() => {
@@ -298,20 +316,55 @@ export default function App() {
     return () => window.removeEventListener('resize', handleResize);
   }, [gameObjects, view, draw]);
 
+  const stopGame = () => {
+    setIsPlaying(false);
+    if (engineRef.current) {
+      engineRef.current.stop();
+      engineRef.current = null;
+    }
+    setGameObjects([]);
+    draw([]);
+  };
+
   const runGame = () => {
-    let currentObjects: GameObject[] = [];
+    setIsPlaying(true);
+    setIsScriptOpen(false);
     
+    let currentObjects: GameObject[] = [];
+    let updateCallbacks: Function[] = [];
+    let keys: Record<string, boolean> = {};
+    let isRunning = true;
+
+    const handleKeyDown = (e: KeyboardEvent) => { keys[e.key] = true; };
+    const handleKeyUp = (e: KeyboardEvent) => { keys[e.key] = false; };
+    
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+
     const GameAPI = {
-        createPart: (x: number, y: number, color: string) => {
-            currentObjects.push({ x, y, color: color || 'white', w: 50, h: 50 });
-            setGameObjects([...currentObjects]);
-            draw(currentObjects);
+        createPart: (x: number, y: number, color: string, w: number = 50, h: number = 50) => {
+            const part = { x, y, color: color || 'white', w, h };
+            currentObjects.push(part);
+            return part;
         },
+        onUpdate: (cb: Function) => {
+            updateCallbacks.push(cb);
+        },
+        getKeys: () => keys,
+        getCanvasWidth: () => canvasRef.current?.width || 800,
+        getCanvasHeight: () => canvasRef.current?.height || 600,
         clear: () => {
             currentObjects = [];
-            setGameObjects([]);
-            draw([]);
+            updateCallbacks = [];
         }
+    };
+
+    engineRef.current = {
+      stop: () => {
+        isRunning = false;
+        window.removeEventListener('keydown', handleKeyDown);
+        window.removeEventListener('keyup', handleKeyUp);
+      }
     };
 
     GameAPI.clear();
@@ -334,6 +387,23 @@ export default function App() {
     };
 
     executeScripts(gameTree);
+
+    let lastTime = performance.now();
+    const loop = (time: number) => {
+      if (!isRunning) return;
+      
+      const dt = (time - lastTime) / 1000;
+      lastTime = time;
+
+      updateCallbacks.forEach(cb => {
+        try { cb(dt); } catch(e) { console.error(e); }
+      });
+
+      draw(currentObjects);
+      requestAnimationFrame(loop);
+    };
+    
+    requestAnimationFrame(loop);
   };
 
   const addScript = (parentNode: TreeNode, e: React.MouseEvent) => {
@@ -758,6 +828,8 @@ export default function App() {
         .add-script-btn:hover { opacity: 1; color: #fff; }
         .run-btn { background: #28a745; color: white; border: none; padding: 5px 15px; border-radius: 3px; cursor: pointer; font-weight: bold; }
         .run-btn:hover { background: #218838; }
+        .stop-btn { background: #dc3545; color: white; border: none; padding: 5px 15px; border-radius: 3px; cursor: pointer; font-weight: bold; }
+        .stop-btn:hover { background: #c82333; }
         textarea { flex: 1; background: #1e1e1e; color: #d4d4d4; padding: 15px; font-family: monospace; border: none; outline: none; font-size: 14px; resize: none; }
         .btns { padding: 10px; display: flex; gap: 10px; background: #2d2d2d; justify-content: flex-end; }
         .close-btn { background: #444; color: white; border: none; padding: 5px 15px; border-radius: 3px; cursor: pointer; }
@@ -769,16 +841,23 @@ export default function App() {
       
       <header style={{ height: '40px', background: '#252526', borderBottom: '1px solid #3c3c3c', display: 'flex', alignItems: 'center', padding: '0 15px', fontWeight: 'bold', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', alignItems: 'center' }}>
-            <button className="back-btn" onClick={() => setView('lobby')}>← LOBBY</button>
-            {isMobile && (
+            <button className="back-btn" onClick={() => {
+              if (isPlaying) stopGame();
+              setView('lobby');
+            }}>← LOBBY</button>
+            {isMobile && !isPlaying && (
               <button className="toggle-explorer-btn" onClick={() => setShowExplorer(!showExplorer)}>
                 {showExplorer ? 'Hide Explorer' : 'Show Explorer'}
               </button>
             )}
-            {!isMobile && <span>BLOXCRAFT STUDIO v2.0</span>}
+            {!isMobile && <span>BLOXCRAFT STUDIO v2.0 {isPlaying ? '- PLAYING' : ''}</span>}
             {isMobile && <span style={{ marginLeft: '10px', color: '#888', fontSize: '12px' }}>LITE</span>}
           </div>
-          <button className="run-btn" onClick={runGame}>▶ RODAR JOGO</button>
+          {isPlaying ? (
+            <button className="stop-btn" onClick={stopGame}>⏹ PARAR JOGO</button>
+          ) : (
+            <button className="run-btn" onClick={runGame}>▶ RODAR JOGO</button>
+          )}
       </header>
 
       {globalMessage && (
@@ -791,7 +870,7 @@ export default function App() {
           <div id="viewport" style={{ flex: 1, background: '#000', position: 'relative', display: 'flex', flexDirection: 'column' }}>
               <canvas ref={canvasRef} style={{ background: '#111', width: '100%', height: '100%', cursor: 'crosshair', display: 'block' }}></canvas>
               
-              {isScriptOpen && (
+              {!isPlaying && isScriptOpen && (
                 <div id="script-window" style={{ position: 'absolute', top: isMobile ? '0' : '50px', left: isMobile ? '0' : '50px', width: isMobile ? '100%' : '80%', height: isMobile ? '100%' : '80%', background: '#1e1e1e', border: isMobile ? 'none' : '2px solid #3c3c3c', display: 'flex', flexDirection: 'column', zIndex: 10 }}>
                     <div style={{ padding: '10px', background: '#333', fontWeight: 'bold' }}>Editor de Script: <span style={{ color: '#00ff00' }}>{activeScript?.name}</span></div>
                     <textarea 
@@ -807,7 +886,7 @@ export default function App() {
               )}
           </div>
 
-          {showExplorer && (
+          {!isPlaying && showExplorer && (
             <div id="explorer" style={{ width: isMobile ? '100%' : '220px', position: isMobile ? 'absolute' : 'relative', right: 0, top: 0, bottom: 0, background: '#252526', borderLeft: '1px solid #3c3c3c', fontSize: '13px', overflowY: 'auto', zIndex: 5 }}>
                 <div style={{ padding: '10px', background: '#333', fontSize: '11px', fontWeight: 'bold', letterSpacing: '1px', display: 'flex', justifyContent: 'space-between' }}>
                   EXPLORER

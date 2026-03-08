@@ -31,6 +31,7 @@ type Game = {
   blocks: any[];
   scripts: string;
   lastModified: number;
+  ownerId?: string;
 };
 
 type View = 'lobby' | 'editor';
@@ -96,6 +97,7 @@ export default function App() {
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   const [showExplorer, setShowExplorer] = useState(window.innerWidth >= 768);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isPlayOnlyMode, setIsPlayOnlyMode] = useState(false);
   const engineRef = useRef<{ stop: () => void } | null>(null);
 
   // Load users and banned list from localStorage
@@ -147,6 +149,13 @@ export default function App() {
 
     if (authMode === 'login') {
       if (existingUser) {
+        if (!existingUser.password && authPassword) {
+          const updatedUser = { ...existingUser, password: authPassword };
+          setAllUsers(prev => prev.map(u => u.id === updatedUser.id ? updatedUser : u));
+          setUser(updatedUser);
+          setView('lobby');
+          return;
+        }
         if (existingUser.password && existingUser.password !== authPassword) {
           alert('Incorrect password.');
           return;
@@ -267,15 +276,24 @@ export default function App() {
       name: `New Game ${games.length + 1}`,
       blocks: [],
       scripts: '// New Game Script',
-      lastModified: Date.now()
+      lastModified: Date.now(),
+      ownerId: user?.id
     };
     setGames([...games, newGame]);
     setCurrentGameId(newGame.id);
+    setIsPlayOnlyMode(false);
     setView('editor');
   };
 
-  const enterGame = (id: string) => {
+  const editGame = (id: string) => {
     setCurrentGameId(id);
+    setIsPlayOnlyMode(false);
+    setView('editor');
+  };
+
+  const playGame = (id: string) => {
+    setCurrentGameId(id);
+    setIsPlayOnlyMode(true);
     setView('editor');
   };
 
@@ -405,6 +423,16 @@ export default function App() {
     
     requestAnimationFrame(loop);
   };
+
+  useEffect(() => {
+    if (view === 'editor' && isPlayOnlyMode && !isPlaying) {
+      const timer = setTimeout(() => {
+        runGame();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, isPlayOnlyMode, isPlaying]);
 
   const addScript = (parentNode: TreeNode, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -692,26 +720,39 @@ export default function App() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {games.map(game => (
+            {games.map(game => {
+              const isOwner = !game.ownerId || game.ownerId === user?.id;
+              return (
               <div 
                 key={game.id}
-                onClick={() => enterGame(game.id)}
-                className="group bg-zinc-900 border border-white/10 rounded-[32px] p-6 cursor-pointer hover:border-blue-500/50 hover:shadow-2xl hover:shadow-blue-500/10 transition-all"
+                className="group bg-zinc-900 border border-white/10 rounded-[32px] p-6 transition-all relative"
               >
-                <div className="aspect-video bg-black/40 rounded-2xl mb-6 flex items-center justify-center overflow-hidden relative">
+                <div 
+                  onClick={() => playGame(game.id)}
+                  className="aspect-video bg-black/40 rounded-2xl mb-6 flex items-center justify-center overflow-hidden relative cursor-pointer hover:border-blue-500/50 hover:shadow-2xl hover:shadow-blue-500/10 transition-all"
+                >
                   <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent z-10" />
-                  <BoxIcon className="w-12 h-12 text-zinc-700 group-hover:text-blue-500/50 transition-colors" />
+                  <Play className="w-12 h-12 text-zinc-700 group-hover:text-blue-500/50 transition-colors z-20" />
                 </div>
-                <h3 className="text-xl font-bold mb-2">{game.name}</h3>
-                <div className="flex items-center justify-between text-sm text-zinc-500 font-medium">
-                  <span>Last edited {new Date(game.lastModified).toLocaleDateString()}</span>
-                  <div className="flex items-center gap-1">
-                    <Users className="w-4 h-4" />
-                    <span>Private</span>
+                <div className="flex justify-between items-start">
+                  <div>
+                    <h3 className="text-xl font-bold mb-2">{game.name}</h3>
+                    <div className="flex items-center justify-between text-sm text-zinc-500 font-medium">
+                      <span>Last edited {new Date(game.lastModified).toLocaleDateString()}</span>
+                    </div>
                   </div>
+                  {isOwner && (
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); editGame(game.id); }}
+                      className="bg-zinc-800 hover:bg-zinc-700 text-white p-3 rounded-xl transition-colors"
+                      title="Edit in Studio"
+                    >
+                      <Code className="w-5 h-5" />
+                    </button>
+                  )}
                 </div>
               </div>
-            ))}
+            )})}
           </div>
         </main>
 
@@ -817,6 +858,27 @@ export default function App() {
   }
 
   // 2D Studio Editor View
+  if (isPlayOnlyMode) {
+    return (
+      <div style={{ background: '#000', height: '100vh', display: 'flex', flexDirection: 'column', position: 'relative' }}>
+        {globalMessage && (
+          <div style={{ background: '#dc2626', color: 'white', textAlign: 'center', padding: '5px', fontSize: '12px', fontWeight: 'bold', letterSpacing: '1px', zIndex: 100 }}>
+            GLOBAL: {globalMessage}
+          </div>
+        )}
+        <div style={{ position: 'absolute', top: globalMessage ? '40px' : '10px', left: '10px', zIndex: 100 }}>
+          <button 
+            onClick={() => { stopGame(); setView('lobby'); setIsPlayOnlyMode(false); }} 
+            style={{ background: 'rgba(0,0,0,0.6)', color: 'white', border: '1px solid rgba(255,255,255,0.2)', padding: '8px 16px', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold', backdropFilter: 'blur(4px)' }}
+          >
+            ← Leave Game
+          </button>
+        </div>
+        <canvas ref={canvasRef} style={{ background: '#111', width: '100%', height: '100%', display: 'block' }}></canvas>
+      </div>
+    );
+  }
+
   return (
     <div style={{ background: '#1a1a1a', color: '#ccc', fontFamily: 'sans-serif', height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <style>{`
